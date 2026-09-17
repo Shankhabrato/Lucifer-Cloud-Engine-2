@@ -4,7 +4,7 @@ import asyncio
 import re
 import gc
 from dotenv import load_dotenv
-from pyrogram import Client, filters
+from pyrogram import Client
 from pyrogram.errors import FloodWait
 import database as db
 
@@ -94,7 +94,7 @@ async def copy_with_bot(bot, dest_id, source_chat, msg_id, caption):
         if "PEER_ID_INVALID" in str(e).upper() or "CHANNEL_PRIVATE" in str(e).upper(): raise e
         return False
 
-# ================= 🚀 V5.0 CORE ENGINE TASK =================
+# ================= 🚀 V6.0 RADAR SCAN ENGINE =================
 async def run_sync_task():
     conf = await db.get_config()
     tokens = conf.get("tokens", [])
@@ -112,20 +112,19 @@ async def run_sync_task():
     
     bots = []
     max_bots = min(35, len(tokens)) 
-    print(f"🔄 Logging in {max_bots} Worker Bots (In-Memory Safe Mode)...")
+    print(f"🔄 Booting {max_bots} Bots & Running RADAR SCAN (No Ping Needed!)...")
     
     try:
         for i in range(max_bots):
             try:
-                # 🔥 THE MASTER FIX 1: in_memory=True = NO MORE DATABASE LOCKED ERRORS!
                 bot = Client(f"bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tokens[i], in_memory=True)
-                
-                # 🔥 THE MASTER FIX 2: BOTS KO EARS (KAAN) DE DIYE!
-                @bot.on_message()
-                async def ping_catcher(client, message):
-                    pass # Message dekhte hi channel memory me lock ho jayega!
-                    
                 await bot.start()
+                
+                # 🔥 THE MAGIC FIX: RADAR SCAN (AUTO-CACHE)
+                try:
+                    async for _ in bot.get_dialogs(): pass
+                except Exception: pass
+                
                 bots.append(bot)
                 await asyncio.sleep(0.2)
             except Exception as e: 
@@ -137,16 +136,29 @@ async def run_sync_task():
             
         fetch_bot = bots[0]
         
-        end_msg_id = 1800000 
+        end_msg_id = 0
         try:
             async for latest_msg in fetch_bot.get_chat_history(source_chat, limit=1):
                 end_msg_id = latest_msg.id
-        except Exception: pass
+        except Exception as e:
+            print(f"⚠️ History fetch error (Radar scanning again): {e}")
+            
+        # 🔥 THE GHOST FIX: Agar channel khali hai, toh stop kardo.
+        if end_msg_id == 0:
+            await db.update_progress(1, 1, 0, 0, "✅ Channel is Empty! Waiting for new files...", time.time())
+            await db.set_engine_status("STOPPED")
+            return
 
         last_copied = await db.get_last_copied_msg_id(source_chat)
         current_msg_id = (last_copied + 1) if last_copied else 1
         
-        total_files = end_msg_id - current_msg_id
+        # Agar saare files copy ho gaye hain toh ruk jao
+        if current_msg_id > end_msg_id:
+            await db.update_progress(end_msg_id, end_msg_id, 0, 0, "✅ All Caught Up! Sync Complete.", time.time())
+            await db.set_engine_status("STOPPED")
+            return
+            
+        total_files = end_msg_id - current_msg_id + 1
         processed_count = 0
         success_count = 0
         failed_count = 0
@@ -228,7 +240,6 @@ async def run_sync_task():
                                 else:
                                     failed_count += 1
                                     
-                            # 🔥 THE MASTER FIX 3: Agar cache error aaya, toh silently fail nahi hoga!
                             if cache_error:
                                 raise Exception("PEER_ID_INVALID")
                                 
@@ -247,16 +258,19 @@ async def run_sync_task():
             except Exception as e:
                 error_msg = str(e).lower()
                 if "peer_id_invalid" in error_msg or "peer id invalid" in error_msg or "channel_private" in error_msg:
-                    await db.update_progress(total_files, processed_count, success_count, failed_count, "⚠️ PING REQUIRED! SEND '.' IN CHANNELS NOW!", start_time)
-                    print("⚠️ Cache Lost! SEND A MESSAGE IN THE CHANNEL NOW... 🛠️")
-                    await asyncio.sleep(5) # Yeh wait karega jab tak tum Ping nahi karte
+                    await db.update_progress(total_files, processed_count, success_count, failed_count, "🔄 AUTO-FIXING CACHE... PLEASE WAIT", start_time)
+                    print("⚠️ Cache Lost! Running Auto-Radar Sync... 🛠️")
+                    for b in bots:
+                        try:
+                            async for _ in b.get_dialogs(): pass
+                        except: pass
+                    await asyncio.sleep(2)
                 else:
                     current_msg_id = chunk_end + 1
                     await asyncio.sleep(2)
 
     finally:
-        # 🔥 THE MASTER FIX 4: ZOMBIE BOTS KILLER! (No more RAM Leaks or DB Locks)
-        print("🧹 Cleaning up bots & releasing memory...")
+        print("🧹 Engine stopped. Cleaning up memory...")
         for b in bots:
             try: await b.stop()
             except: pass
