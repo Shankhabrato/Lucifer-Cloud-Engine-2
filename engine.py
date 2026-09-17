@@ -14,20 +14,78 @@ API_HASH = os.getenv("API_HASH")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# 🔥 NEW FEATURE: CRUISE CONTROL (Speed Limit)
+SPEED_GOVERNOR = 0.15 
+
+# ================= 🧠 PARSER & CAPTION MAKER 🧠 =================
 EP_PATTERN = r"(?:^|[\s\[\(\.\-_])(?:(?:S(?:eason)?\s*(\d{1,3}))(?:[\s\.\-_]*(?:E|EP|Episode)\s*[\.\-_]?\s*(\d{1,4}))?|(?:EP|Episode)\s*[\.\-_]?\s*(\d{1,4})|E(\d{1,4}))(?:[\s\]\)\.\-_]|$)"
 
 def classify_media(text):
     if re.search(EP_PATTERN, text, re.IGNORECASE): return "SERIES"
     return "MOVIE"
 
-async def copy_with_bot(bot, dest_id, source_chat, msg_id):
+def extract_metadata(filename, caption, file_size_bytes):
+    text = f"{filename} {caption}"
+    meta = {}
+    
+    source_map = {r'\b(bluray)\b': 'BluRay', r'\b(remux)\b': 'REMUX', r'\b(web-?dl)\b': 'WEB-DL', r'\b(webrip)\b': 'WEBRip', r'\b(hdtv)\b': 'HDTV', r'\b(hdcam)\b': 'HDCAM'}
+    sources = [display for pattern, display in source_map.items() if re.search(pattern, text, re.IGNORECASE)]
+    meta['Source'] = " / ".join(sources) if sources else None
+
+    codec_map = {r'\b(x265|hevc)\b': 'x265', r'\b(x264|avc)\b': 'x264', r'\b(av1)\b': 'AV1'}
+    codecs = [display for pattern, display in codec_map.items() if re.search(pattern, text, re.IGNORECASE)]
+    if not codecs:
+        fallback_list = ['10Bit', 'HDR', 'DV', 'REMUX', 'BluRay', 'WEB-DL']
+        codecs = [tag for tag in fallback_list if re.search(r'(?:^|[^a-zA-Z0-9])' + re.escape(tag) + r'(?:[^a-zA-Z0-9]|$)', text, re.IGNORECASE)]
+    meta['Codec'] = " / ".join(codecs[:2]) if codecs else None
+
+    res_map = {r'\b(2160p|4k)\b': '2160p / 4K', r'\b(1080p)\b': '1080p', r'\b(720p)\b': '720p', r'\b(480p)\b': '480p'}
+    for pattern, display in res_map.items():
+        if re.search(pattern, text, re.IGNORECASE):
+            meta['Resolution'] = display
+            break
+    else: meta['Resolution'] = None
+
+    meta['HDR'] = 'Dolby Vision' if re.search(r'\b(dolby\s*vision|dv)\b', text, re.IGNORECASE) else ('HDR10+' if re.search(r'\b(hdr10\+)\b', text, re.IGNORECASE) else ('HDR' if re.search(r'\b(hdr)\b', text, re.IGNORECASE) else None))
+    meta['Video'] = '10Bit' if re.search(r'\b(10-?bit)\b', text, re.IGNORECASE) else None
+    meta['Audio'] = 'Dolby Atmos' if re.search(r'\b(dolby\s*atmos)\b', text, re.IGNORECASE) else ('DTS' if re.search(r'\b(dts)\b', text, re.IGNORECASE) else ('AAC' if re.search(r'\b(aac)\b', text, re.IGNORECASE) else None))
+
+    match = re.search(EP_PATTERN, text, re.IGNORECASE)
+    if match:
+        meta['Season'] = f"S{int(match.group(1)):02d}" if match.group(1) else None
+        meta['Episode'] = f"E{int(match.group(2) or match.group(3) or match.group(4)):02d}" if (match.group(2) or match.group(3) or match.group(4)) else None
+    else: meta['Season'], meta['Episode'] = None, None
+
+    meta['Format'] = filename.split('.')[-1].upper() if '.' in filename else "FILE"
+    size_mb = file_size_bytes / (1024 * 1024)
+    meta['Size'] = f"{size_mb / 1024:.2f} GB" if size_mb >= 1024 else f"{size_mb:.2f} MB"
+
+    return meta
+
+def build_cinematic_caption(filename, meta):
+    cap = f"[@LuciferDatabase] 🎬 File Name: {filename}\n━━━━━━━━━━━━━━━━━━━\n"
+    cap += f"💾 DB ID: [@LuciferDatabase] | 🌐 Source: {meta['Source'] or 'N/A'}\n"
+    cap += f"⚖️ Size: {meta['Size']} | 🎬 Format: {meta['Format']} | ⚙️ Codec: {meta['Codec'] or 'N/A'}\n"
+    if meta['Resolution']: cap += f"📺 Resolution: {meta['Resolution']}\n"
+    vid_hdr = [f"🎞️ Video: {meta['Video']}" if meta['Video'] else "", f"✨ HDR: {meta['HDR']}" if meta['HDR'] else ""]
+    vid_hdr_str = " | ".join(filter(None, vid_hdr))
+    if vid_hdr_str: cap += vid_hdr_str + "\n"
+    if meta['Audio']: cap += f"🔊 Audio: {meta['Audio']}\n"
+    se = [f"📺 Season: {meta['Season']}" if meta['Season'] else "", f"🎬 Episode: {meta['Episode']}" if meta['Episode'] else ""]
+    se_str = " | ".join(filter(None, se))
+    if se_str: cap += se_str + "\n"
+    cap += f"━━━━━━━━━━━━━━━━━━━\n📢 Join: @LuciferDatabase for fast downloads & Database access.\n❓ Need a File? Request: [@RequestLuciferDatabase]\n━━━━━━━━━━━━━━━━━━━"
+    return cap
+
+# ================= CORE COPY FUNCTION =================
+async def copy_with_bot(bot, dest_id, source_chat, msg_id, caption):
     try:
-        await bot.copy_message(chat_id=dest_id, from_chat_id=source_chat, message_id=msg_id)
+        await bot.copy_message(chat_id=dest_id, from_chat_id=source_chat, message_id=msg_id, caption=caption)
         return True
     except FloodWait as e:
         await asyncio.sleep(e.value)
         try:
-            await bot.copy_message(chat_id=dest_id, from_chat_id=source_chat, message_id=msg_id)
+            await bot.copy_message(chat_id=dest_id, from_chat_id=source_chat, message_id=msg_id, caption=caption)
             return True
         except Exception: return False
     except Exception: return False
@@ -53,7 +111,7 @@ async def run_sync_task():
     bots = []
     
     # 🔒 SEVALLA OOM FIX: Safe Network Sockets & In-Memory Login
-    max_bots = min(30, len(tokens)) 
+    max_bots = min(20, len(tokens)) 
     print(f"🔄 Logging in {max_bots} Worker Bots (Safe Network Mode)...")
     for i in range(max_bots):
         try:
@@ -94,11 +152,11 @@ async def run_sync_task():
     start_time = time.time() 
     await db.update_progress(total_files, processed_count, success_count, failed_count, last_file_name, start_time)
 
-    # 🔒 RAM OPTIMIZATION: Max 7 active copies at once
+    # 🔒 RAM OPTIMIZATION: Semaphore back to * 2 (As you requested for 60 files capacity)
     semaphore = asyncio.Semaphore(len(bots) * 2)
     bot_index = 0
 
-    print(f"🚀 ENGINE RUNNING WITH {len(bots)} ACTIVE BOTS (RAM Optimized)!")
+    print(f"🚀 ENGINE RUNNING WITH {len(bots)} ACTIVE BOTS (Speed Governed to {SPEED_GOVERNOR}s)!")
 
     while current_msg_id <= end_msg_id:
         status = await db.get_engine_status()
@@ -125,26 +183,45 @@ async def run_sync_task():
                     continue
                 
                 media = msg.document or msg.video
-                filename = getattr(media, 'file_name', None) or (msg.caption[:30] if msg.caption else "Unknown")
+                raw_filename = getattr(media, 'file_name', None) or (msg.caption[:50] if msg.caption else "Unknown Media")
+                
+                # 🔥 Underscore hatane wala logic taaki caption ekdum Clean aaye
+                if "." in raw_filename:
+                    name_part = raw_filename.rsplit(".", 1)[0]
+                    ext = raw_filename.rsplit(".", 1)[-1]
+                    filename = name_part.replace("_", " ") + "." + ext
+                else:
+                    filename = raw_filename.replace("_", " ")
+
+                msg_caption = msg.caption or ""
+                f_size = media.file_size or 0
                 last_file_name = filename[:35] + "..." 
                 
-                classification = classify_media(filename)
+                classification = classify_media(f"{filename} {msg_caption}")
                 target_dest_list = series_dests if classification == "SERIES" else movie_dests
                 target_chats = [int(str(d).split(" - ")[0].strip()) for d in target_dest_list]
                 
                 if target_chats:
-                    tasks = []
-                    for dest_id in target_chats:
-                        worker_bot = bots[bot_index % len(bots)]
-                        tasks.append(copy_with_bot(worker_bot, dest_id, source_chat, msg.id))
-                        bot_index += 1
-                        
+                    meta = extract_metadata(filename, msg_caption, f_size)
+                    naya_caption = build_cinematic_caption(filename, meta)
+                    
                     async with semaphore:
+                        tasks = []
+                        for dest_id in target_chats:
+                            worker_bot = bots[bot_index % len(bots)]
+                            tasks.append(asyncio.create_task(copy_with_bot(worker_bot, dest_id, source_chat, msg.id, naya_caption)))
+                            bot_index += 1
+                            # 🔥 YEH HAI JADOO: 0.02s gap prevents Socket Error & Maintains Perfect Sequence (Bot 1, 2, 3...)
+                            await asyncio.sleep(0.02)
+                            
                         results = await asyncio.gather(*tasks, return_exceptions=True)
                         if any(res is True for res in results): success_count += 1
                         else: failed_count += 1
                             
                 await db.mark_file_copied(source_chat, msg.id)
+                
+                # 🏎️ THE CRUISE CONTROL APPLIED HERE
+                await asyncio.sleep(SPEED_GOVERNOR)
                 
             await db.update_progress(total_files, processed_count, success_count, failed_count, last_file_name, start_time)
             current_msg_id = chunk_end + 1
