@@ -4,7 +4,7 @@ import asyncio
 import re
 import gc
 from dotenv import load_dotenv
-from pyrogram import Client
+from pyrogram import Client, filters
 from pyrogram.errors import FloodWait
 import database as db
 
@@ -14,7 +14,7 @@ API_HASH = os.getenv("API_HASH")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# 🔥 NEW FEATURE: CRUISE CONTROL (Speed Limit)
+# 🔥 CRUISE CONTROL (Speed Limit)
 SPEED_GOVERNOR = 0.15 
 
 # ================= 🧠 PARSER & CAPTION MAKER 🧠 =================
@@ -110,17 +110,22 @@ async def run_sync_task():
     os.makedirs("sessions", exist_ok=True)
     bots = []
     
-    # 🔒 SEVALLA OOM FIX: Safe Network Sockets & In-Memory Login
     max_bots = min(20, len(tokens)) 
-    print(f"🔄 Logging in {max_bots} Worker Bots (Safe Network Mode)...")
+    print(f"🔄 Logging in {max_bots} Worker Bots (Disk Session Mode)...")
+    
     for i in range(max_bots):
         try:
-            # in_memory=True se file lock nahi hoga
-            bot = Client(f"engine_bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tokens[i], in_memory=True)
+            # 🔥 FIX 1: in_memory=True HATA DIYA taaki cache permanent rahe!
+            bot = Client(f"sessions/engine_bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tokens[i])
+            
+            # 🔥 FIX 2: BOTS KO KAAN (EARS) DE DIYE! Ab ping message turant cache ho jayega!
+            @bot.on_message(filters.chat(all_chats_to_cache))
+            async def cache_catcher(client, message):
+                pass
+                
             await bot.start()
             bots.append(bot)
-            # 1 second ka delay Telegram block aur socket crash ko rokega
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
         except Exception as e: 
             print(f"⚠️ Bot {i} failed to connect: {e}")
             
@@ -152,11 +157,10 @@ async def run_sync_task():
     start_time = time.time() 
     await db.update_progress(total_files, processed_count, success_count, failed_count, last_file_name, start_time)
 
-    # 🔒 RAM OPTIMIZATION: Semaphore back to * 2 (As you requested for 60 files capacity)
     semaphore = asyncio.Semaphore(len(bots) * 2)
     bot_index = 0
 
-    print(f"🚀 ENGINE RUNNING WITH {len(bots)} ACTIVE BOTS (Speed Governed to {SPEED_GOVERNOR}s)!")
+    print(f"🚀 ENGINE RUNNING WITH {len(bots)} ACTIVE BOTS!")
 
     while current_msg_id <= end_msg_id:
         status = await db.get_engine_status()
@@ -165,7 +169,8 @@ async def run_sync_task():
             await asyncio.sleep(2)
             continue
 
-        chunk_end = min(current_msg_id + 19, end_msg_id)
+        # 🔥 FIX 3: AB 20 NAHI, SEEDHA 200 MESSAGES EK SATH SCAN KAREGA!
+        chunk_end = min(current_msg_id + 199, end_msg_id)
         message_ids_to_fetch = list(range(current_msg_id, chunk_end + 1))
         
         try:
@@ -173,19 +178,23 @@ async def run_sync_task():
             
             if not messages:
                 current_msg_id = chunk_end + 1
+                processed_count += len(message_ids_to_fetch)
+                failed_count += len(message_ids_to_fetch)
+                await db.mark_file_copied(source_chat, chunk_end)
                 continue
+
+            copied_in_this_chunk = False
 
             for msg in messages:
                 processed_count += 1
                 if msg.empty or not (msg.video or msg.document):
                     failed_count += 1
-                    await db.mark_file_copied(source_chat, msg.id)
                     continue
                 
+                copied_in_this_chunk = True
                 media = msg.document or msg.video
                 raw_filename = getattr(media, 'file_name', None) or (msg.caption[:50] if msg.caption else "Unknown Media")
                 
-                # 🔥 Underscore hatane wala logic taaki caption ekdum Clean aaye
                 if "." in raw_filename:
                     name_part = raw_filename.rsplit(".", 1)[0]
                     ext = raw_filename.rsplit(".", 1)[-1]
@@ -211,20 +220,24 @@ async def run_sync_task():
                             worker_bot = bots[bot_index % len(bots)]
                             tasks.append(asyncio.create_task(copy_with_bot(worker_bot, dest_id, source_chat, msg.id, naya_caption)))
                             bot_index += 1
-                            # 🔥 YEH HAI JADOO: 0.02s gap prevents Socket Error & Maintains Perfect Sequence (Bot 1, 2, 3...)
                             await asyncio.sleep(0.02)
                             
                         results = await asyncio.gather(*tasks, return_exceptions=True)
                         if any(res is True for res in results): success_count += 1
                         else: failed_count += 1
                             
-                await db.mark_file_copied(source_chat, msg.id)
+                # Har file ke baad database hit karna band, ab end mein karenge
                 
-                # 🏎️ THE CRUISE CONTROL APPLIED HERE
-                await asyncio.sleep(SPEED_GOVERNOR)
-                
+            # 🔥 Database ko sirf chunk ke end me update karenge taaki speed 100x rahe!
+            await db.mark_file_copied(source_chat, chunk_end)
             await db.update_progress(total_files, processed_count, success_count, failed_count, last_file_name, start_time)
             current_msg_id = chunk_end + 1
+            
+            if copied_in_this_chunk:
+                await asyncio.sleep(SPEED_GOVERNOR)
+            else:
+                # Agar saare 200 messages deleted/khali the, toh rocket ki tarah aage bhago!
+                await asyncio.sleep(0.2)
             
             del messages
             gc.collect() 
@@ -232,7 +245,9 @@ async def run_sync_task():
         except Exception as e:
             error_msg = str(e).lower()
             if "peer id invalid" in error_msg or "peer_id_invalid" in error_msg:
-                print("⚠️ Cache Lost! Auto-Healing BOTS... 🛠️")
+                # 🔥 FIX 4: DASHBOARD PE ALERT BHEJEGA!
+                await db.update_progress(total_files, processed_count, success_count, failed_count, "⚠️ PING REQUIRED! SEND '.' IN CHANNELS NOW!", start_time)
+                print("⚠️ Cache Lost! SEND A MESSAGE IN THE CHANNEL NOW... 🛠️")
                 for b in bots:
                     for c in all_chats_to_cache:
                         try: await b.get_chat(c)
