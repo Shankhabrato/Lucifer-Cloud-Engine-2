@@ -4,7 +4,7 @@ import asyncio
 import re
 import gc
 from dotenv import load_dotenv
-from pyrogram import Client, filters
+from pyrogram import Client
 from pyrogram.errors import FloodWait
 import database as db
 
@@ -87,14 +87,36 @@ async def copy_with_bot(bot, dest_id, source_chat, msg_id, caption):
         try:
             await bot.copy_message(chat_id=dest_id, from_chat_id=source_chat, message_id=msg_id, caption=caption)
             return True
-        except Exception as e: 
-            if "PEER_ID_INVALID" in str(e).upper() or "CHANNEL_PRIVATE" in str(e).upper(): raise e
-            return False
-    except Exception as e: 
-        if "PEER_ID_INVALID" in str(e).upper() or "CHANNEL_PRIVATE" in str(e).upper(): raise e
-        return False
+        except Exception: return False
+    except Exception: return False
 
-# ================= 🚀 V8.0 BULLETPROOF ENGINE =================
+# ================= 🛡️ NEW CORE FIX: EXPLICIT CACHE VERIFIER =================
+async def verify_bot_cache(bot, chat_ids):
+    """Yeh function insure karega ki har ek bot ko channels ka access pakka mil gaya hai."""
+    missing_chats = []
+    for cid in chat_ids:
+        try:
+            await bot.get_chat(cid)
+        except Exception:
+            missing_chats.append(cid)
+            
+    if missing_chats:
+        try:
+            # Agar channel cache mein nahi hai, toh Dialogs scan karke forcibly cache karega
+            async for _ in bot.get_dialogs(limit=100):
+                pass
+        except Exception:
+            pass
+            
+        # Scan karne ke baad aakhri baar verify karega
+        for cid in missing_chats:
+            try:
+                await bot.get_chat(cid)
+            except Exception:
+                return False # Agar abhi bhi nahi mila, matlab channel sach mein blank hai
+    return True
+
+# ================= 🚀 V9.0 BULLETPROOF ENGINE =================
 async def run_sync_task():
     conf = await db.get_config()
     tokens = conf.get("tokens", [])
@@ -109,6 +131,7 @@ async def run_sync_task():
 
     source_chat = int(active_source_str.split(" - ")[0].strip())
     dest_chats = [int(str(d).split(" - ")[0].strip()) for d in (movie_dests + series_dests)]
+    all_chats_to_cache = list(set([source_chat] + dest_chats))
     
     os.makedirs("sessions", exist_ok=True)
     bots = []
@@ -116,15 +139,10 @@ async def run_sync_task():
     print(f"🔄 Booting {max_bots} Bots (Disk Sessions Enabled)...")
     
     try:
+        # 1. BOTS LOGIN
         for i in range(max_bots):
             try:
                 bot = Client(f"sessions/bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tokens[i])
-                
-                # 🔥 BOTS ARE EAGERLY LISTENING!
-                @bot.on_message()
-                async def ping_catcher(client, message):
-                    pass 
-                    
                 await bot.start()
                 bots.append(bot)
                 await asyncio.sleep(0.2)
@@ -135,32 +153,36 @@ async def run_sync_task():
             await db.set_engine_status("STOPPED")
             return
             
-        fetch_bot = bots[0]
+        # 2. 🛡️ CORE PROBLEM FIX: VERIFY CACHE FOR ALL BOTS BEFORE DOING ANYTHING
+        print("🔍 Checking Cache & Memory for ALL bots...")
+        await db.update_progress(1, 0, 0, 0, "🔍 Syncing Bot Memory... Please wait.", time.time())
         
-        end_msg_id = 0
-        cache_lost = True
-        
-        # 🔥 THE MASTER FIX: Bots zinda reh kar wait karenge!
-        print("🔍 Checking Source Channel Memory...")
-        while cache_lost:
+        cache_ready = False
+        while not cache_ready:
             status = await db.get_engine_status()
             if status != "RUNNING":
-                return # User ne Stop dabaya toh properly exit hoga
+                return # Agar user ne Stop kar diya toh safely exit karega
                 
-            try:
-                async for latest_msg in fetch_bot.get_chat_history(source_chat, limit=1):
-                    end_msg_id = latest_msg.id
-                cache_lost = False
-                print("✅ Source Channel Memory Restored!")
-            except Exception as e:
-                error_msg = str(e).upper()
-                if "PEER_ID_INVALID" in error_msg or "CHANNEL_PRIVATE" in error_msg:
-                    await db.update_progress(1, 0, 0, 0, "⚠️ PING REQUIRED! SEND '.' IN CHANNELS NOW!", time.time())
-                    print("⚠️ Bots are actively listening... SEND '.' IN THE CHANNEL NOW!")
-                    await asyncio.sleep(5) # Bots disconnect nahi honge, bas 5s wait karenge aur phir check karenge
-                else:
-                    print(f"⚠️ History fetch error: {e}")
-                    await asyncio.sleep(5)
+            # Sabhi bots ka memory check parallel mein chalega (super fast)
+            tasks = [verify_bot_cache(b, all_chats_to_cache) for b in bots]
+            results = await asyncio.gather(*tasks)
+            
+            if all(results):
+                cache_ready = True
+                print("✅ All bots successfully verified Source & Dest Channels!")
+            else:
+                await db.update_progress(1, 0, 0, 0, "⚠️ SEND '.' IN CHANNELS TO WAKE BOTS UP!", time.time())
+                print("⚠️ Channels are empty or missing in cache. Waiting 10 seconds... Please send a '.' in channels.")
+                await asyncio.sleep(10) # Loop nahi tutega, yahan 10 sec rukk kar wapas check karega
+        
+        # 3. GET LIMITS (Ab koi Peer_Id_Invalid nahi aayega!)
+        fetch_bot = bots[0]
+        end_msg_id = 0
+        try:
+            async for latest_msg in fetch_bot.get_chat_history(source_chat, limit=1):
+                end_msg_id = latest_msg.id
+        except Exception as e:
+            print(f"⚠️ Unexpected History Error: {e}")
             
         if end_msg_id == 0:
             await db.update_progress(1, 1, 0, 0, "✅ Channel is Empty! Waiting for new files...", time.time())
@@ -175,19 +197,19 @@ async def run_sync_task():
             await db.set_engine_status("STOPPED")
             return
             
+        # 4. START THE CORE LOOP
         total_files = end_msg_id - current_msg_id + 1
         processed_count = 0
         success_count = 0
         failed_count = 0
         last_file_name = "Reading Channel..."
-        
         start_time = time.time() 
+        
         await db.update_progress(total_files, processed_count, success_count, failed_count, last_file_name, start_time)
 
         semaphore = asyncio.Semaphore(len(bots) * 2)
         bot_index = 0
-
-        print(f"🚀 ENGINE RUNNING WITH {len(bots)} ACTIVE BOTS!")
+        print(f"🚀 ENGINE RUNNING FULL SPEED WITH {len(bots)} BOTS!")
 
         while current_msg_id <= end_msg_id:
             status = await db.get_engine_status()
@@ -201,7 +223,6 @@ async def run_sync_task():
             
             try:
                 messages = await fetch_bot.get_messages(source_chat, message_ids_to_fetch)
-                
                 if not messages:
                     current_msg_id = chunk_end + 1
                     processed_count += len(message_ids_to_fetch)
@@ -247,43 +268,27 @@ async def run_sync_task():
                                 await asyncio.sleep(0.02)
                                 
                             results = await asyncio.gather(*tasks, return_exceptions=True)
-                            
-                            cache_error = False
                             for res in results:
-                                if isinstance(res, Exception):
-                                    if "PEER_ID_INVALID" in str(res).upper() or "CHANNEL_PRIVATE" in str(res).upper():
-                                        cache_error = True
-                                elif res is True:
-                                    success_count += 1
-                                else:
-                                    failed_count += 1
-                                    
-                            if cache_error:
-                                raise Exception("PEER_ID_INVALID")
+                                if res is True: success_count += 1
+                                else: failed_count += 1
                                 
                 await db.mark_file_copied(source_chat, chunk_end)
                 await db.update_progress(total_files, processed_count, success_count, failed_count, last_file_name, start_time)
                 current_msg_id = chunk_end + 1
                 
-                if copied_in_this_chunk:
-                    await asyncio.sleep(SPEED_GOVERNOR)
-                else:
-                    await asyncio.sleep(0.2)
+                if copied_in_this_chunk: await asyncio.sleep(SPEED_GOVERNOR)
+                else: await asyncio.sleep(0.2)
                 
                 del messages
                 gc.collect() 
                 
             except Exception as e:
-                error_msg = str(e).lower()
-                if "peer_id_invalid" in error_msg or "peer id invalid" in error_msg or "channel_private" in error_msg:
-                    await db.update_progress(total_files, processed_count, success_count, failed_count, "⚠️ PING REQUIRED! SEND '.' IN CHANNELS NOW!", start_time)
-                    print("⚠️ Cache Lost mid-sync! Bots are listening... SEND '.' NOW!")
-                    await asyncio.sleep(5) # Stays alive and retries chunk!
-                else:
-                    current_msg_id = chunk_end + 1
-                    await asyncio.sleep(2)
+                print(f"⚠️ Routine Error: {e}")
+                current_msg_id = chunk_end + 1
+                await asyncio.sleep(2)
 
     finally:
+        # 5. ZERO DB LOCKS GUARANTEE (Chahe kuch bhi ho jaye, memory release hogi)
         print("🧹 Engine stopped. Cleaning up bots & releasing DB locks...")
         for b in bots:
             try: await b.stop()
