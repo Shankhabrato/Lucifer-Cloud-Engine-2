@@ -94,7 +94,7 @@ async def copy_with_bot(bot, dest_id, source_chat, msg_id, caption):
         if "PEER_ID_INVALID" in str(e).upper() or "CHANNEL_PRIVATE" in str(e).upper(): raise e
         return False
 
-# ================= 🚀 V7.0 THE HYBRID ENGINE =================
+# ================= 🚀 V8.0 BULLETPROOF ENGINE =================
 async def run_sync_task():
     conf = await db.get_config()
     tokens = conf.get("tokens", [])
@@ -118,10 +118,9 @@ async def run_sync_task():
     try:
         for i in range(max_bots):
             try:
-                # 🔥 FIX 1: Disk Sessions are Back (No Memory Loss)
                 bot = Client(f"sessions/bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tokens[i])
                 
-                # 🔥 FIX 2: Bots actively listen for Ping to save Peer ID
+                # 🔥 BOTS ARE EAGERLY LISTENING!
                 @bot.on_message()
                 async def ping_catcher(client, message):
                     pass 
@@ -139,24 +138,29 @@ async def run_sync_task():
         fetch_bot = bots[0]
         
         end_msg_id = 0
-        cache_lost = False
-        try:
-            async for latest_msg in fetch_bot.get_chat_history(source_chat, limit=1):
-                end_msg_id = latest_msg.id
-        except Exception as e:
-            error_msg = str(e).upper()
-            if "PEER_ID_INVALID" in error_msg or "CHANNEL_PRIVATE" in error_msg:
-                cache_lost = True
-            else:
-                print(f"⚠️ History fetch error: {e}")
+        cache_lost = True
         
-        # 🔥 FIX 3: Wait 30 seconds for Ping instead of crashing
-        if cache_lost:
-            await db.update_progress(1, 0, 0, 0, "⚠️ PING REQUIRED! SEND '.' IN CHANNELS NOW!", time.time())
-            print("⚠️ Cache Lost! Engine is waiting 30 seconds for you to send a Ping (.) in the channels...")
-            for _ in range(15):
-                await asyncio.sleep(2)
-            return # 30s baad loop khud restart hoke check karega
+        # 🔥 THE MASTER FIX: Bots zinda reh kar wait karenge!
+        print("🔍 Checking Source Channel Memory...")
+        while cache_lost:
+            status = await db.get_engine_status()
+            if status != "RUNNING":
+                return # User ne Stop dabaya toh properly exit hoga
+                
+            try:
+                async for latest_msg in fetch_bot.get_chat_history(source_chat, limit=1):
+                    end_msg_id = latest_msg.id
+                cache_lost = False
+                print("✅ Source Channel Memory Restored!")
+            except Exception as e:
+                error_msg = str(e).upper()
+                if "PEER_ID_INVALID" in error_msg or "CHANNEL_PRIVATE" in error_msg:
+                    await db.update_progress(1, 0, 0, 0, "⚠️ PING REQUIRED! SEND '.' IN CHANNELS NOW!", time.time())
+                    print("⚠️ Bots are actively listening... SEND '.' IN THE CHANNEL NOW!")
+                    await asyncio.sleep(5) # Bots disconnect nahi honge, bas 5s wait karenge aur phir check karenge
+                else:
+                    print(f"⚠️ History fetch error: {e}")
+                    await asyncio.sleep(5)
             
         if end_msg_id == 0:
             await db.update_progress(1, 1, 0, 0, "✅ Channel is Empty! Waiting for new files...", time.time())
@@ -273,16 +277,13 @@ async def run_sync_task():
                 error_msg = str(e).lower()
                 if "peer_id_invalid" in error_msg or "peer id invalid" in error_msg or "channel_private" in error_msg:
                     await db.update_progress(total_files, processed_count, success_count, failed_count, "⚠️ PING REQUIRED! SEND '.' IN CHANNELS NOW!", start_time)
-                    print("⚠️ Cache Lost mid-sync! Waiting 30s for Ping...")
-                    for _ in range(15):
-                        await asyncio.sleep(2)
-                    break 
+                    print("⚠️ Cache Lost mid-sync! Bots are listening... SEND '.' NOW!")
+                    await asyncio.sleep(5) # Stays alive and retries chunk!
                 else:
                     current_msg_id = chunk_end + 1
                     await asyncio.sleep(2)
 
     finally:
-        # 🔥 FIX 4: ZERO DATABASE LOCKS - Always close connection
         print("🧹 Engine stopped. Cleaning up bots & releasing DB locks...")
         for b in bots:
             try: await b.stop()
