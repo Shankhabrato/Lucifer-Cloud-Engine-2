@@ -63,7 +63,7 @@ def extract_metadata(filename, caption, file_size_bytes):
     return meta
 
 def build_cinematic_caption(filename, meta):
-    cap = f"[@LuciferDatabase] 🎬 File Name: {filename}\n━━━━━━━━━━━━━━━━━━━\n"
+    cap = f"{filename}\n━━━━━━━━━━━━━━━━━━━\n"
     cap += f"💾 DB ID: [@LuciferDatabase] | 🌐 Source: {meta['Source'] or 'N/A'}\n"
     cap += f"⚖️ Size: {meta['Size']} | 🎬 Format: {meta['Format']} | ⚙️ Codec: {meta['Codec'] or 'N/A'}\n"
     if meta['Resolution']: cap += f"📺 Resolution: {meta['Resolution']}\n"
