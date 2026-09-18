@@ -4,9 +4,8 @@ import asyncio
 import re
 import gc
 from dotenv import load_dotenv
-from pyrogram import Client
+from pyrogram import Client, filters
 from pyrogram.errors import FloodWait, PeerIdInvalid, ChannelPrivate
-from motor.motor_asyncio import AsyncIOMotorClient
 import database as db
 
 load_dotenv()
@@ -85,28 +84,7 @@ async def copy_with_bot(bot, dest_id, source_chat, msg_id, caption):
     except Exception: 
         return False
 
-# ================= 🛡️ THE CACHE FIXER =================
-async def ensure_bot_cache(bot, chat_id):
-    """Forcefully verifies or injects Peer ID into the bot's cache."""
-    try:
-        # Step 1: Direct fetch attempt
-        await bot.get_chat(chat_id)
-        return True
-    except (PeerIdInvalid, ChannelPrivate):
-        try:
-            # Step 2: Try fetching via get_dialogs as a fallback
-            async for dialog in bot.get_dialogs(limit=50):
-                if dialog.chat.id == chat_id:
-                    return True
-            return False
-        except Exception as e:
-            print(f"Error during fallback cache check for {chat_id}: {e}")
-            return False
-    except Exception as e:
-        print(f"Unexpected error checking cache for {chat_id}: {e}")
-        return False
-
-# ================= 🚀 V10.0 BULLETPROOF ENGINE =================
+# ================= 🚀 FINAL V11 BULLETPROOF ENGINE =================
 async def run_sync_task():
     conf = await db.get_config()
     tokens = conf.get("tokens", [])
@@ -126,49 +104,62 @@ async def run_sync_task():
     os.makedirs("sessions", exist_ok=True)
     active_bots = []
     
-    # We will only use bots that successfully cache ALL required channels
     max_bots = min(35, len(tokens))
-    print(f"🔄 Booting {max_bots} Bots & Verifying Cache...")
-    await db.update_progress(1, 0, 0, 0, "🔍 Verifying Cache for all bots...", time.time())
+    print(f"🔄 Booting {max_bots} Bots & Establishing Connection...")
+    await db.update_progress(1, 0, 0, 0, "🔄 Bots Booting... Please wait.", time.time())
 
     for i in range(max_bots):
         try:
-            # Use disk sessions to preserve state across restarts
             bot = Client(f"sessions/bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tokens[i])
-            await bot.start()
             
-            # Verify cache for all required channels for this specific bot
-            all_cached = True
-            for chat_id in all_target_chats:
-                is_cached = await ensure_bot_cache(bot, chat_id)
-                if not is_cached:
-                    print(f"⚠️ Bot {i} failed to cache channel {chat_id}")
-                    all_cached = False
-                    break # If one channel fails, this bot is unusable for this task
-            
-            if all_cached:
-                active_bots.append(bot)
-            else:
-                 await bot.stop() # Stop unusable bots immediately to save resources
+            # 🔥 THIS IS THE CRITICAL FIX: Bots ko sunne ki takat do
+            @bot.on_message(filters.chat(all_target_chats))
+            async def cache_updater(client, message):
+                pass # Bas message aate hi cache update ho jayega
 
-            await asyncio.sleep(0.5) # Prevent aggressive API hitting
+            await bot.start()
+            active_bots.append(bot)
+            await asyncio.sleep(0.5) 
             
         except Exception as e:
             print(f"⚠️ Bot {i} initialization failed: {e}")
 
     if not active_bots:
-        print("❌ CRITICAL: No bots were able to verify cache for the required channels.")
-        await db.update_progress(1, 0, 0, 0, "❌ CACHE FAILED! Please manually forward a message from Source to Master Bot, then restart.", time.time())
+        print("❌ CRITICAL: No bots initialized.")
         await db.set_engine_status("STOPPED")
         return
 
-    print(f"✅ Cache Verified! Starting Engine with {len(active_bots)} ready bots.")
-    await db.update_progress(1, 0, 0, 0, f"✅ Cache verified. Starting with {len(active_bots)} bots...", time.time())
-
-    fetch_bot = active_bots[0]
-    end_msg_id = 0
+    print(f"✅ {len(active_bots)} Bots initialized. Validating access...")
     
-    # Get the latest message ID to know the bounds
+    # Validation Phase
+    validation_passed = False
+    fetch_bot = active_bots[0]
+    
+    while not validation_passed:
+        status = await db.get_engine_status()
+        if status == "STOPPED": 
+            for b in active_bots: await b.stop()
+            return
+
+        try:
+            # Check source chat
+            await fetch_bot.get_chat(source_chat)
+            # Check dest chats
+            for dest in dest_chats:
+                await fetch_bot.get_chat(dest)
+            
+            validation_passed = True
+            print("✅ Access validated successfully!")
+            
+        except (PeerIdInvalid, ChannelPrivate) as e:
+            print(f"⚠️ Access error: {e}. Waiting for a message in the channels...")
+            await db.update_progress(1, 0, 0, 0, "⚠️ SEND '.' IN ALL CHANNELS TO SYNC!", time.time())
+            await asyncio.sleep(5) # Wait for the user to send a message
+        except Exception as e:
+            print(f"⚠️ Unexpected validation error: {e}")
+            await asyncio.sleep(5)
+
+    end_msg_id = 0
     try:
         async for latest_msg in fetch_bot.get_chat_history(source_chat, limit=1):
             end_msg_id = latest_msg.id
